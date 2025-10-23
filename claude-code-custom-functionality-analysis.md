@@ -1319,5 +1319,722 @@ update_all_existing_agents() {
 
 ---
 
+## `/speckit.intro` 命令实现
+
+**添加日期**: 2025-10-23
+**最后更新**: 2025-10-23 (添加项目架构扫描和对齐分析)
+
+### 功能概述
+
+`/speckit.intro` 命令是一个**只读分析命令**,用于生成项目的整体概览和进展报告。它不仅扫描 `.specify` 目录下的规范内容,还会**扫描整个项目的实际代码实现**,提供一个全面的"鸟瞰视图",帮助项目相关方快速了解:
+
+**规范层面 (Specification Layer):**
+- 项目正在构建什么(从规范文档)
+- 每个功能的规划进度
+- 计划使用的技术栈
+- 任务完成情况
+
+**实现层面 (Implementation Layer):**
+- 实际的项目架构和目录结构
+- 已实现的文件和代码行数
+- 实际使用的技术栈(从配置文件检测)
+- 代码统计和测试覆盖率
+
+**对齐分析 (Alignment Analysis):**
+- 规范与实现的匹配度
+- 计划技术栈 vs 实际技术栈
+- 任务完成度 vs 代码交付情况
+- 缺失的实现和孤立的代码
+
+### 设计决策
+
+#### 为什么不需要 Shell 脚本?
+
+与其他命令(如 `/speckit.specify`, `/speckit.plan`)不同,`/speckit.intro` 是一个**纯粹的只读分析命令**,因此不需要创建专门的 shell 脚本。原因如下:
+
+1. **无状态操作**: 不创建文件、不修改内容、不切换分支
+2. **简单的文件读取**: 只需读取现有文件并分析
+3. **复用现有工具**: 利用 `common.sh` 中的 `get_repo_root()` 函数
+4. **AI 原生处理**: 文件分析和报告生成是 AI 的强项,不需要额外的脚本层
+
+#### 与 `/speckit.analyze` 的区别
+
+| 特性 | `/speckit.intro` | `/speckit.analyze` |
+|------|------------------|-------------------|
+| 作用范围 | **项目级别**(所有功能) | **功能级别**(单个功能) |
+| 分析深度 | 概览和统计 | 深度一致性检查 |
+| 目标受众 | 项目管理者、利益相关方 | 开发者、技术负责人 |
+| 输出格式 | 执行摘要 + 进度报告 | 问题清单 + 修复建议 |
+| 使用时机 | 随时查看项目状态 | 任务生成后、实现前 |
+
+### 命令定义文件
+
+**文件**: `.claude/commands/speckit.intro.md`
+
+#### Front Matter
+
+```yaml
+---
+description: Generate a comprehensive project overview and spec-kit progress report by analyzing all specifications, plans, and tasks.
+---
+```
+
+#### 关键指令
+
+**1. 初始化分析上下文**
+
+```bash
+source .specify/scripts/bash/common.sh
+REPO_ROOT=$(get_repo_root)
+SPECS_DIR="$REPO_ROOT/.specify/specs"
+```
+
+使用 `common.sh` 的函数确保在 Git 和非 Git 仓库中都能正常工作。
+
+**2. 加载项目基础**
+
+- 读取 `.specify/memory/constitution.md` → 提取项目原则
+- 读取 Agent 上下文文件(`CLAUDE.md` 等) → 提取技术栈总结
+
+**3. 发现所有功能**
+
+扫描 `.specify/specs/` 目录,找到所有匹配 `###-*` 模式的功能目录。
+
+**4. 分析每个功能**
+
+从每个功能目录中提取:
+
+| 文件 | 提取内容 |
+|------|---------|
+| `spec.md` | 功能名称、状态、用户故事数、需求数、成功标准 |
+| `plan.md` | 技术栈、阶段状态、架构方法 |
+| `tasks.md` | 总任务数、已完成数、进行中数、待办数、并行任务数 |
+
+**状态判断逻辑**:
+
+```text
+Draft                  → 只有 spec.md 存在
+Planning               → spec.md + plan.md 存在,但没有 tasks.md
+Ready for Implementation → 所有文档存在,tasks.md 完成度 0%
+In Progress            → tasks.md 存在,完成度 1-99%
+Complete               → tasks.md 存在,完成度 100%
+```
+
+**5. 生成项目概览报告**
+
+输出一个结构化的 Markdown 报告,包含:
+
+```markdown
+# 🌱 Project Overview & Progress Report
+
+## 📋 Executive Summary
+[项目摘要,从 constitution 和 specs 合成]
+
+## 🎯 Features Overview
+[功能列表表格,包含状态、进度、技术栈]
+
+## 📊 Overall Statistics
+[功能统计、任务统计、覆盖度指标]
+
+## 🛠️ Technology Stack Summary
+[跨所有功能的技术栈汇总]
+
+## 🚀 Detailed Feature Breakdown
+[每个功能的详细信息]
+
+## 📈 Progress Timeline
+[时间线,如果有 Git 历史]
+
+## 🎓 Recommendations
+[基于分析的可执行建议]
+
+## 🔧 Available Commands
+[可用命令列表]
+```
+
+### 核心功能
+
+#### 1. 项目架构扫描
+
+命令会扫描整个项目目录(排除常见的忽略模式):
+
+**排除目录:**
+- `.git/` - Git 版本控制
+- `node_modules/` - Node.js 依赖
+- `.specify/` - Spec-kit 自身(已单独分析)
+- `__pycache__/`, `venv/`, `.venv/` - Python 缓存和虚拟环境
+- `dist/`, `build/` - 构建输出
+
+**技术栈检测:**
+
+通过检测特定文件来识别项目类型和技术栈:
+
+| 文件 | 检测结果 |
+|------|---------|
+| `package.json` | Node.js/npm 项目 |
+| `requirements.txt`, `pyproject.toml` | Python 项目 |
+| `*.csproj`, `*.sln` | .NET/C# 项目 |
+| `go.mod` | Go 项目 |
+| `Cargo.toml` | Rust 项目 |
+| `tsconfig.json` | TypeScript |
+| `Dockerfile`, `docker-compose.yml` | Docker 容器化 |
+
+**统计信息:**
+- 按文件类型分组的文件数量
+- 代码行数(使用 `wc -l`)
+- 配置文件、测试文件、文档文件计数
+- 目录结构树状图
+
+#### 2. 对齐分析 (Alignment Analysis)
+
+这是 `/speckit.intro` 的核心创新功能,用于**验证规范与实现的一致性**:
+
+**文件存在性检查:**
+- 从 `tasks.md` 中提取所有提到的文件路径
+- 验证这些文件是否实际存在于项目中
+- 计算实现率: `(存在的文件数 / 提到的文件数) × 100%`
+
+**状态判断逻辑:**
+
+| 条件 | 状态 | 标记 |
+|------|------|------|
+| 所有文件存在 + 任务 100% 完成 | 完全实现 | ✅ Fully Implemented |
+| 部分文件存在 + 任务 1-99% 完成 | 部分实现 | 🟡 Partially Implemented |
+| 文件存在但无对应任务 | 孤立代码 | ⚠️ Code without Spec |
+| 任务标记完成但文件不存在 | 缺失实现 | ❌ Missing Implementation |
+| 无文件 + 无任务或 0% 完成 | 未开始 | ⏳ Not Started |
+
+**技术栈对齐:**
+- 比较 `plan.md` 中声明的技术栈
+- 与实际检测到的技术栈(从配置文件)
+- 标记版本不匹配或缺失的组件
+
+**示例:**
+```text
+计划: Python 3.11 + FastAPI
+实际: Python 3.9 + FastAPI 0.104.1
+
+结果: ⚠️ Python 版本不匹配 (3.11 → 3.9)
+      ✅ FastAPI 已安装
+```
+
+### 执行流程
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│                    1. 用户调用 /speckit.intro                    │
+│                                                                  │
+│  可选参数:                                                        │
+│  - 无参数: 完整报告(规范 + 实现 + 对齐分析)                     │
+│  - "summary" 或 "brief": 简要版本                                │
+│  - "001": 仅显示功能 001 的详细信息                              │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                  2. 初始化分析上下文                              │
+│                                                                  │
+│  - source .specify/scripts/bash/common.sh                       │
+│  - 获取 REPO_ROOT                                                │
+│  - 确定 SPECS_DIR 路径                                           │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                  3. 扫描项目架构 (新增)                           │
+│                                                                  │
+│  使用 find 命令扫描整个项目:                                      │
+│  ├─ 排除 .git/, node_modules/, .specify/, venv/ 等              │
+│  ├─ 检测项目类型(Node.js / Python / .NET / etc.)                │
+│  ├─ 读取配置文件提取依赖:                                        │
+│  │   ├─ package.json → dependencies                             │
+│  │   ├─ requirements.txt → Python packages                      │
+│  │   ├─ pyproject.toml → Python metadata                        │
+│  │   └─ docker-compose.yml → 基础设施配置                        │
+│  ├─ 计算统计信息:                                                │
+│  │   ├─ 总文件数(按扩展名分类)                                   │
+│  │   ├─ 代码行数(使用 wc -l)                                     │
+│  │   ├─ 配置文件数                                               │
+│  │   └─ 测试文件数                                               │
+│  └─ 生成目录结构树                                               │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                  4. 加载项目基础文件                              │
+│                                                                  │
+│  读取(如果存在):                                                  │
+│  ├─ .specify/memory/constitution.md                             │
+│  ├─ CLAUDE.md, GEMINI.md, 或其他 agent 上下文文件                │
+│  └─ 提取: 项目原则、约束、技术栈总结                             │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                  5. 发现所有功能目录                              │
+│                                                                  │
+│  扫描 .specify/specs/ 目录:                                      │
+│  ├─ 查找模式: ###-* (例如: 001-user-auth, 002-dashboard)         │
+│  ├─ 按编号排序                                                   │
+│  └─ 构建功能列表                                                 │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│            6. 循环分析每个功能目录(规范层)                        │
+│                                                                  │
+│  对于每个功能 (001, 002, 003...):                                │
+│  ├─ 读取 spec.md:                                                │
+│  │   ├─ 功能名称                                                 │
+│  │   ├─ 用户故事数量 (## User Scenarios 部分)                    │
+│  │   ├─ 功能需求数量 (## Requirements 部分)                      │
+│  │   └─ 成功标准数量 (## Success Criteria 部分)                  │
+│  ├─ 读取 plan.md (如果存在):                                     │
+│  │   ├─ 技术栈 (## Technical Context 部分)                       │
+│  │   ├─ 语言/版本                                                │
+│  │   ├─ 框架                                                     │
+│  │   ├─ 数据库                                                   │
+│  │   └─ 测试框架                                                 │
+│  ├─ 读取 tasks.md (如果存在):                                    │
+│  │   ├─ 总任务数 (统计 - [ ] 和 - [X] 行)                       │
+│  │   ├─ 已完成任务 (统计 - [X] 或 - [x])                        │
+│  │   ├─ 进行中任务 (从上下文推断)                                │
+│  │   ├─ 待办任务 (总数 - 已完成)                                 │
+│  │   └─ 并行任务 (统计 [P] 标记)                                │
+│  ├─ 计算完成百分比: (已完成 / 总任务数) × 100%                   │
+│  └─ 确定状态: Draft | Planning | Ready | In Progress | Complete │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│              7. 执行对齐分析 (新增核心功能)                       │
+│                                                                  │
+│  对于每个功能:                                                    │
+│  ├─ 从 tasks.md 提取所有提到的文件路径                           │
+│  ├─ 在项目目录中查找这些文件是否存在                             │
+│  ├─ 计算实现率:                                                  │
+│  │   实现率 = (存在的文件数 / 提到的文件数) × 100%              │
+│  ├─ 判断实现状态:                                                │
+│  │   ├─ ✅ 完全实现: 所有文件存在 + 任务 100% 完成              │
+│  │   ├─ 🟡 部分实现: 部分文件存在 + 任务 1-99% 完成             │
+│  │   ├─ ⚠️ 孤立代码: 文件存在但无对应任务                       │
+│  │   ├─ ❌ 缺失实现: 任务完成但文件不存在                        │
+│  │   └─ ⏳ 未开始: 无文件 + 任务 0% 或无 tasks.md               │
+│  ├─ 技术栈对齐检查:                                              │
+│  │   ├─ 比较 plan.md 中的声明                                    │
+│  │   ├─ 与步骤 3 检测到的实际技术栈                              │
+│  │   └─ 标记不匹配: 版本差异、缺失组件                          │
+│  └─ 生成对齐报告                                                 │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                  8. 汇总统计数据                                  │
+│                                                                  │
+│  计算:                                                            │
+│  ├─ 总功能数                                                     │
+│  ├─ 各状态功能数 (完成、进行中、就绪、规划中、草稿)              │
+│  ├─ 总任务数 (跨所有功能)                                        │
+│  ├─ 已完成任务数 (跨所有功能)                                    │
+│  ├─ 待办任务数 (跨所有功能)                                      │
+│  ├─ 总用户故事数                                                 │
+│  ├─ 总功能需求数                                                 │
+│  └─ 总成功标准数                                                 │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                9. 汇总技术栈(双层对比)                            │
+│                                                                  │
+│  从所有 plan.md 文件中提取(计划的技术栈):                         │
+│  ├─ 语言和框架 (去重,标注使用的功能编号)                         │
+│  ├─ 存储解决方案 (数据库、缓存等)                                │
+│  └─ 测试框架                                                     │
+│                                                                  │
+│  从实际项目中检测(步骤 3 的结果):                                 │
+│  ├─ 实际使用的语言版本                                           │
+│  ├─ 安装的框架和库                                               │
+│  └─ 配置的基础设施                                               │
+│                                                                  │
+│  生成对比表:                                                      │
+│  | 组件 | 计划 | 实际 | 状态 |                                    │
+│  | 语言 | Python 3.11 | Python 3.9 | ⚠️ 版本不匹配 |            │
+│  | 框架 | FastAPI | FastAPI 0.104.1 | ✅ 匹配 |                │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│            10. 生成结构化 Markdown 报告                           │
+│                                                                  │
+│  输出到终端(增强版结构):                                          │
+│  ├─ 执行摘要 (基于 constitution 和功能概览)                      │
+│  ├─ 🏗️ 项目架构部分 (新增):                                     │
+│  │   ├─ 目录结构树                                               │
+│  │   ├─ 技术栈(检测到的)                                         │
+│  │   └─ 项目统计(文件数、代码行数、测试覆盖率)                   │
+│  ├─ 功能概览表格 (新增列):                                       │
+│  │   ├─ 规范状态                                                 │
+│  │   ├─ 任务进度                                                 │
+│  │   ├─ 实现状态 (新增)                                          │
+│  │   └─ 对齐情况 (新增)                                          │
+│  ├─ 统计数据 (功能、任务、覆盖度)                                │
+│  ├─ 🔄 对齐分析部分 (新增):                                      │
+│  │   ├─ 对齐总结                                                 │
+│  │   ├─ 技术栈对比表                                             │
+│  │   ├─ 实现缺口(任务完成但文件缺失)                             │
+│  │   ├─ 孤立代码(文件存在但无规范)                               │
+│  │   └─ 修复建议                                                 │
+│  ├─ 技术栈总结 (计划 vs 实际)                                    │
+│  ├─ 详细功能分解 (每个功能的深入信息 + 实现状态)                 │
+│  ├─ 进度时间线 (如果有 Git 历史)                                 │
+│  ├─ 建议 (下一步行动、质量改进、对齐修复)                        │
+│  └─ 可用命令列表                                                 │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                    9. 处理边缘情况                                │
+│                                                                  │
+│  - 无功能存在: 提示使用 /speckit.specify 创建第一个功能          │
+│  - 无 constitution: 提示使用 /speckit.constitution               │
+│  - 空 specs 目录: 提供入门指导                                   │
+│  - 不完整的功能: 突出显示缺失内容,建议下一步命令                 │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                      10. 报告完成                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 进度条可视化
+
+报告中使用 Unicode 字符生成进度条:
+
+```text
+0%    [░░░░░░░░░░] 0/10 tasks
+25%   [██░░░░░░░░] 2.5/10 tasks
+50%   [█████░░░░░] 5/10 tasks
+75%   [███████░░░] 7.5/10 tasks
+100%  [██████████] 10/10 tasks
+```
+
+计算逻辑:
+
+```javascript
+filled_blocks = Math.floor((completed_tasks / total_tasks) * 10)
+empty_blocks = 10 - filled_blocks
+progress_bar = "█".repeat(filled_blocks) + "░".repeat(empty_blocks)
+```
+
+### 状态标记系统
+
+使用表情符号表示功能状态:
+
+| 状态 | 标记 | 条件 |
+|------|------|------|
+| Complete | 🟢 | tasks.md 完成度 = 100% |
+| In Progress | 🟡 | tasks.md 完成度 1-99% |
+| Ready for Implementation | 🔵 | 所有文档存在,tasks.md 完成度 = 0% |
+| Planning | 🟣 | spec.md + plan.md 存在,无 tasks.md |
+| Draft | ⚪ | 只有 spec.md 存在 |
+
+### 输出行为
+
+#### 自动保存到文件
+
+报告**自动保存到 `.specify/intro/` 目录**,使用智能命名规则:
+
+**文件命名规则**:
+```
+.specify/intro/{BRANCH_NAME}_{YYYY-MM-DD}_{HH-MM-SS}.md
+```
+
+**命名示例**:
+- `main_2025-10-23_14-30-45.md` - 在 main 分支生成
+- `001-user-auth_2025-10-23_09-15-20.md` - 在功能分支 001-user-auth 生成
+- `feature-dashboard_2025-10-23_16-42-10.md` - 在 feature-dashboard 分支生成
+
+**命名逻辑**:
+1. **分支名**: 自动从 Git 获取当前分支(如果不是 Git 仓库,使用 "main")
+2. **日期**: 使用 YYYY-MM-DD 格式的当前日期
+3. **时间**: 使用 HH-MM-SS 格式的当前时间
+4. **特殊字符处理**: 将分支名中的 `/` 替换为 `-`
+
+**目录结构**:
+```
+.specify/
+├── intro/                          ← 报告输出目录(自动创建)
+│   ├── main_2025-10-23_14-30-45.md
+│   ├── 001-user-auth_2025-10-23_09-15-20.md
+│   ├── 001-user-auth_2025-10-24_10-20-30.md  ← 同一分支的历史记录
+│   └── 002-dashboard_2025-10-24_11-45-00.md
+├── specs/                          ← 功能规范
+├── scripts/                        ← Shell 脚本
+└── templates/                      ← 模板
+```
+
+**优点**:
+- ✅ **自动化**: 无需手动指定文件名
+- ✅ **可追溯**: 文件名包含分支和时间,便于追踪
+- ✅ **历史记录**: 每次运行都创建新文件,保留历史快照
+- ✅ **按分支组织**: 相同分支的报告文件名前缀相同,便于查找
+- ✅ **时间戳**: 精确到秒,避免文件名冲突
+
+#### 终端输出: 简要摘要
+
+虽然完整报告保存到文件,但终端会显示**简要摘要**:
+
+```markdown
+# ✅ Project Overview Report Generated
+
+**Report saved to**: `.specify/intro/main_2025-10-23_14-30-45.md`
+
+## Quick Summary
+
+**Project Status**:
+- Total Features: 3
+- Overall Progress: 45%
+- Implementation Alignment: 67%
+
+**Feature Breakdown**:
+- 🟢 Complete: 0 features
+- 🟡 In Progress: 1 feature
+- 🔵 Ready to Implement: 1 feature
+- 🟣 Planning: 1 feature
+
+**Technology Stack**:
+- Python 3.9 + FastAPI
+- PostgreSQL 15
+
+**Top 3 Recommendations**:
+1. Continue implementation of Feature 001 - 11 tasks remaining
+2. Generate tasks for Feature 002 using /speckit.tasks
+3. Align Python version: Spec says 3.11, project uses 3.9
+
+---
+
+📄 **View full report**: `.specify/intro/main_2025-10-23_14-30-45.md`
+```
+
+**摘要内容**:
+- 保存的文件路径
+- 项目整体状态(功能数、进度、对齐度)
+- 功能分解(各状态的功能数量)
+- 技术栈概览
+- Top 3 优先建议
+
+### 使用场景
+
+#### 场景 1: 日常进度检查
+
+```bash
+/speckit.intro
+```
+
+**输出**:
+- **文件**: `.specify/intro/main_2025-10-23_14-30-45.md` (完整详细报告)
+- **终端**: 简要摘要(功能数、进度、Top 3 建议)
+
+**用途**: 每日/每周检查项目健康状况
+
+#### 场景 2: 功能分支开发中
+
+```bash
+# 在 001-user-auth 分支执行
+/speckit.intro
+```
+
+**输出**:
+- **文件**: `.specify/intro/001-user-auth_2025-10-23_09-15-20.md`
+- **终端**: 该功能的实现进度摘要
+
+**用途**: 跟踪单个功能的开发进度,验证实现与规范的对齐度
+
+#### 场景 3: 历史记录追踪
+
+```bash
+# 查看 intro 目录
+ls -lt .specify/intro/
+```
+
+**示例输出**:
+```
+001-user-auth_2025-10-24_10-20-30.md  ← 今天的进度
+001-user-auth_2025-10-23_09-15-20.md  ← 昨天的进度
+main_2025-10-23_14-30-45.md           ← main 分支的快照
+```
+
+**用途**: 比较不同时间点的项目状态,分析进度趋势
+
+#### 场景 4: 团队会议前准备
+
+```bash
+# 会议前 5 分钟
+/speckit.intro
+```
+
+**输出**:
+- **文件**: 自动保存,带时间戳
+- **终端**: 立即看到关键指标和 Top 3 建议
+
+**用途**: 快速获取项目现状,准备会议讨论要点
+
+#### 场景 5: 多分支并行开发
+
+```bash
+# 团队有 3 个功能分支在并行开发
+# Branch 001-user-auth
+/speckit.intro
+# → 001-user-auth_2025-10-23_10-00-00.md
+
+# Branch 002-dashboard
+git checkout 002-dashboard
+/speckit.intro
+# → 002-dashboard_2025-10-23_10-05-00.md
+
+# Branch 003-api
+git checkout 003-api
+/speckit.intro
+# → 003-api_2025-10-23_10-10-00.md
+```
+
+**用途**: 每个分支独立跟踪,便于对比不同功能的进展
+
+### 与其他命令的集成
+
+`/speckit.intro` 在工作流中的位置:
+
+```text
+/speckit.constitution   (建立项目原则)
+        ↓
+/speckit.specify        (创建功能规范)
+        ↓
+/speckit.clarify        (澄清需求)
+        ↓
+/speckit.plan           (技术规划)
+        ↓
+/speckit.tasks          (生成任务)
+        ↓
+/speckit.analyze        (一致性检查)
+        ↓
+/speckit.implement      (执行实现)
+        ↓
+/speckit.intro          ← 随时查看整体进度
+```
+
+**关键区别**:
+- 其他命令: **线性工作流**中的步骤
+- `/speckit.intro`: **横向查看**整个项目的工具
+
+### 实现特点
+
+#### 1. 无副作用
+
+- ✅ 只读操作,不修改任何文件
+- ✅ 不切换 Git 分支
+- ✅ 不创建或删除目录
+- ✅ 可以安全地重复运行
+
+#### 2. Token 效率
+
+使用**渐进式披露**策略:
+
+- 默认: 完整报告
+- `summary`: 压缩版(仅统计和功能列表)
+- `###`: 单个功能详情
+
+避免一次性加载所有文件内容到上下文。
+
+#### 3. 容错性
+
+- 缺少 constitution.md → 跳过原则部分
+- 缺少 plan.md → 标记为 "Planning" 状态
+- 缺少 tasks.md → 标记为 "Draft" 或 "Planning"
+- 空 specs 目录 → 显示入门指南
+
+#### 4. 可扩展性
+
+未来可以添加:
+
+- `--json` 参数: 输出机器可读的 JSON 格式
+- `--export` 参数: 导出报告到文件
+- `--compare <branch>`: 比较两个分支的进度
+- `--since <date>`: 显示某个日期以来的变化
+
+### 最佳实践
+
+1. **定期运行**: 建议每周运行一次 `/speckit.intro` 以跟踪项目进度
+2. **站会前**: 在团队站会前运行,获取最新状态
+3. **里程碑检查**: 在达成关键里程碑后运行,验证完成度
+4. **新成员入职**: 让新团队成员运行此命令快速了解项目
+5. **利益相关方更新**: 使用报告向非技术利益相关方展示进度
+
+### 示例输出
+
+```markdown
+# 🌱 Project Overview & Progress Report
+
+**Generated**: 2025-10-23
+**Repository**: /Users/tieli/Projects/my-app
+
+---
+
+## 📋 Executive Summary
+
+This project is building a team productivity platform called Taskify, featuring
+project management, task tracking, and team collaboration capabilities.
+
+### Project Principles
+
+1. Code quality over feature velocity
+2. Test coverage must be >80%
+3. User experience consistency across all features
+
+---
+
+## 🎯 Features Overview
+
+| # | Feature | Status | Progress | Technology Stack |
+|---|---------|--------|----------|------------------|
+| 001 | Create Taskify | 🟡 In Progress | [█████░░░░░] 45% (9/20 tasks) | .NET 8 + Blazor + PostgreSQL |
+| 002 | User Authentication | 🔵 Ready | [░░░░░░░░░░] 0% (0/15 tasks) | .NET 8 + Identity + JWT |
+| 003 | Analytics Dashboard | 🟣 Planning | N/A | TBD |
+
+---
+
+## 📊 Overall Statistics
+
+### Feature Statistics
+- **Total Features**: 3
+- **Completed**: 0 🟢
+- **In Progress**: 1 🟡
+- **Ready to Implement**: 1 🔵
+- **In Planning**: 1 🟣
+- **Draft**: 0 ⚪
+
+### Task Statistics
+- **Total Tasks**: 35
+- **Completed**: 9 (26%)
+- **In Progress**: 2
+- **Pending**: 24
+- **Parallel Tasks**: 8
+
+---
+
+## 🎓 Recommendations
+
+### Immediate Actions
+- [ ] Continue implementation of Feature 001 - 11 tasks remaining
+- [ ] Generate tasks for Feature 002 using /speckit.tasks
+- [ ] Complete planning for Feature 003 using /speckit.plan
+
+---
+```
+
+### 总结
+
+`/speckit.intro` 命令的实现充分体现了 spec-kit 的设计原则:
+
+1. **分离关注点**: 命令定义(`.md`) + 复用工具(`common.sh`)
+2. **只读分析**: 无副作用,安全可重复
+3. **用户友好**: 清晰的视觉呈现,可操作的建议
+4. **灵活性**: 支持完整报告、摘要、单功能查看
+5. **Token 效率**: 渐进式披露,按需加载
+
+这个命令为项目管理者和开发者提供了一个强大的工具,用于快速了解项目的整体健康状况和进度。
+
+---
+
 **分析完成日期**: 2025-10-23
 **分析者**: Claude (Sonnet 4.5)
+**最后更新**: 2025-10-23 (添加 spec.intro 命令实现)
