@@ -43,3 +43,6 @@ env/
 .genreleases/
 *.zip
 sdd-*/
+
+# Local-only directories (Git tracked but not pushed to remote)
+info_for_human/
